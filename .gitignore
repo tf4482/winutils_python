@@ -167,3 +167,4 @@ push.bat
 vendor/
 *spec
 deploy.py
+plans/

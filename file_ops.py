@@ -6,7 +6,6 @@ from typing import Any
 
 from winutils_python import visual
 
-
 Operation = dict[str, Any]
 FILE_OPERATIONS_SECTION = "file_operations"
 OPERATION_TYPES = ("mirror", "copy", "move")
@@ -67,8 +66,8 @@ COMMON_OPTIONS = (
     "/XJF",
     "/XJ",
     "/XC",
-    "/ETA",
-    "/TEE",
+    "/NFL",
+    "/NJH",
 )
 
 MIRROR_OPTIONS = (

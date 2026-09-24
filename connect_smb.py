@@ -13,7 +13,8 @@ import yaml
 
 from winutils_python import visual
 
-DEFAULT_MAPPINGS: tuple[tuple[str, str], ...] = ()
+SmbMapping = tuple[str | None, str]
+DEFAULT_MAPPINGS: tuple[SmbMapping, ...] = ()
 DEFAULT_USER = ""
 SMB_CONFIG_SECTION = "smb"
 SMB_MAPPINGS_KEY = "mappings"
@@ -61,9 +62,9 @@ def is_successful_net_use_return_code(return_code: int) -> bool:
 
 @dataclass(frozen=True)
 class SmbMappingResult:
-    """Result for one attempted SMB drive mapping."""
+    """Result for one attempted SMB connection or drive mapping."""
 
-    drive: str
+    drive: str | None
     share: str
     return_code: int
 
@@ -83,10 +84,16 @@ class SmbConnectionError(RuntimeError):
         self.results = results
         failed_results = [result for result in results if result.failed]
         summary = ", ".join(
-            f"{result.drive} → {result.share}: exit code {result.return_code}"
+            f"{mapping_label(result.drive, result.share)}: exit code {result.return_code}"
             for result in failed_results
         )
-        super().__init__(f"{len(failed_results)} SMB mapping(s) failed: {summary}")
+        super().__init__(f"{len(failed_results)} SMB connection(s) failed: {summary}")
+
+
+def mapping_label(drive: str | None, share: str) -> str:
+    """Return a display label for a mapped or deviceless connection."""
+
+    return f"{drive} → {share}" if drive else share
 
 
 def password_key_stream(length: int) -> bytes:
@@ -273,23 +280,26 @@ def get_password_from_config(
     return password
 
 
-def mappings_from_config(smb_config: dict) -> tuple[tuple[str, str], ...]:
-    """Return configured SMB drive/share mapping pairs."""
+def mappings_from_config(smb_config: dict) -> tuple[SmbMapping, ...]:
+    """Return configured SMB connections with optional drive letters."""
 
     mappings = smb_config.get(SMB_MAPPINGS_KEY)
 
     if not isinstance(mappings, list):
         raise TypeError(f"SMB configuration must define a '{SMB_MAPPINGS_KEY}' list")
 
-    normalized_mappings: list[tuple[str, str]] = []
+    normalized_mappings: list[SmbMapping] = []
     for index, mapping in enumerate(mappings, start=1):
         if not isinstance(mapping, dict):
             raise TypeError(f"SMB mapping {index} must be a table")
 
-        drive = str(mapping.get("drive", "")).strip()
+        configured_drive = mapping.get("drive")
+        drive = str(configured_drive).strip() if configured_drive is not None else None
         share = str(mapping.get("share", "")).strip()
-        if not drive or not share:
-            raise ValueError(f"SMB mapping {index} must define non-empty 'drive' and 'share' values")
+        if drive == "":
+            raise ValueError(f"SMB mapping {index} value 'drive' must be non-empty when configured")
+        if not share:
+            raise ValueError(f"SMB mapping {index} must define a non-empty 'share' value")
 
         normalized_mappings.append((drive, share))
 
@@ -364,36 +374,27 @@ def existing_drive_mapping(drive: str) -> str | None:
 
 
 def run_net_use(
-    drive: str,
+    drive: str | None,
     share: str,
     password: str,
     *,
     user: str = DEFAULT_USER,
     quiet: bool = True,
 ) -> int:
-    """Run ``net use`` for one drive/share mapping and return its exit code."""
+    """Open one mapped or deviceless SMB connection and return its exit code."""
 
     stdout = subprocess.DEVNULL if quiet else None
     stderr = subprocess.DEVNULL if quiet else None
 
     result = subprocess.run(
-        [
-            "net",
-            "use",
-            drive,
-            share,
-            password,
-            f"/USER:{user}",
-            "/Y",
-            "/persistent:yes",
-        ],
+        build_net_use_command(drive, share, password, user=user),
         check=False,
         stdout=stdout,
         stderr=stderr,
         creationflags=subprocess_creationflags(),
     )
 
-    if result.returncode != NET_USE_ALREADY_ASSIGNED_EXIT_CODE:
+    if result.returncode != NET_USE_ALREADY_ASSIGNED_EXIT_CODE or drive is None:
         return result.returncode
 
     existing_share = existing_drive_mapping(drive)
@@ -406,14 +407,30 @@ def run_net_use(
     return result.returncode
 
 
+def build_net_use_command(drive: str | None, share: str, password: str, *, user: str) -> list[str]:
+    """Build a mapped or deviceless ``net use`` command."""
+
+    connection = [drive, share] if drive else [share]
+    persistence = "yes" if drive else "no"
+    return [
+        "net",
+        "use",
+        *connection,
+        password,
+        f"/USER:{user}",
+        "/Y",
+        f"/persistent:{persistence}",
+    ]
+
+
 def connect_smb_shares(
     password: str,
-    mappings: tuple[tuple[str, str], ...] = DEFAULT_MAPPINGS,
+    mappings: tuple[SmbMapping, ...] = DEFAULT_MAPPINGS,
     *,
     user: str = DEFAULT_USER,
     quiet: bool | None = None,
 ) -> list[SmbMappingResult]:
-    """Connect SMB shares and raise when any mapping fails."""
+    """Connect SMB shares and raise when any connection fails."""
 
     if quiet is None:
         quiet = True
@@ -430,7 +447,7 @@ def connect_smb_shares(
 
     for drive, share in mappings:
         if not quiet:
-            visual.print_info(f"Mapping {drive} → {share}", emoji="connect")
+            visual.print_info(f"Connecting {mapping_label(drive, share)}", emoji="connect")
 
         return_code = run_net_use(drive, share, password, user=user, quiet=quiet)
         results.append(SmbMappingResult(drive, share, return_code))
@@ -448,18 +465,20 @@ def connect_smb_shares(
     return results
 
 
-def print_mapping_result(drive: str, return_code: int) -> None:
-    """Print a human-readable status for one SMB mapping result."""
+def print_mapping_result(drive: str | None, return_code: int) -> None:
+    """Print a human-readable status for one SMB connection result."""
+
+    label = drive or "UNC"
 
     if return_code == NET_USE_SUCCESS_EXIT_CODE:
-        visual.print_success(f"Mapping {drive}: OK")
+        visual.print_success(f"Connection {label}: OK")
         return
 
     if return_code == NET_USE_ALREADY_ASSIGNED_EXIT_CODE:
-        visual.print_warning(f"Mapping {drive}: already in use by a different share")
+        visual.print_warning(f"Connection {label}: already in use by a different share")
         return
 
-    visual.print_warning(f"Mapping {drive}: exit code {return_code}")
+    visual.print_warning(f"Connection {label}: exit code {return_code}")
 
 
 def get_table(config: dict, name: str) -> dict:

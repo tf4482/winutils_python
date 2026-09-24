@@ -1,6 +1,7 @@
 """Shared helpers for locating, loading, and validating YAML config files."""
 
 import sys
+from math import isfinite
 from pathlib import Path
 from typing import Any
 
@@ -48,7 +49,14 @@ def is_double_quoted(value: str) -> bool:
 def parse_yaml(config_text: str) -> dict[str, Any]:
     """Parse YAML text into a dictionary, treating empty content as empty."""
 
-    return yaml.safe_load(config_text) or {}
+    loaded = yaml.safe_load(config_text)
+    if loaded is None:
+        return {}
+
+    if not isinstance(loaded, dict):
+        raise TypeError("Configuration root must be a table")
+
+    return loaded
 
 
 def dump_yaml(config: dict[str, Any]) -> str:
@@ -73,8 +81,18 @@ def required_str(config: dict[str, Any], key: str, *, label: str) -> str:
     """Return a required non-empty string config value."""
 
     value = config.get(key)
-    if not isinstance(value, str) or not value:
+    if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{label} must be a non-empty string")
+
+    return value.strip()
+
+
+def optional_bool(config: dict[str, Any], key: str, *, label: str, default: bool) -> bool:
+    """Return an optional strict boolean config value."""
+
+    value = config.get(key, default)
+    if not isinstance(value, bool):
+        raise TypeError(f"Configuration value '{label}' must be true or false")
 
     return value
 
@@ -119,7 +137,7 @@ def normalized_string_set(
         non_empty=non_empty,
         empty_message=empty_list_message,
     )
-    normalized_values = {str(value).lower() for value in values if str(value).strip()}
+    normalized_values = {str(value).strip().lower() for value in values if str(value).strip()}
 
     if not normalized_values:
         message = empty_normalized_message or f"Configuration value '{label}' must define at least one entry"
@@ -160,7 +178,7 @@ def required_int_in_range(
 
     value = config.get(key)
 
-    if isinstance(value, int):
+    if isinstance(value, int) and not isinstance(value, bool):
         number = value
     elif isinstance(value, str) and value.isdigit():
         number = int(value)
@@ -181,7 +199,7 @@ def optional_positive_float(config: dict[str, Any], key: str, *, label: str) -> 
     if value is None:
         return None
 
-    if isinstance(value, int | float):
+    if isinstance(value, int | float) and not isinstance(value, bool):
         number = float(value)
     elif isinstance(value, str):
         try:
@@ -189,9 +207,9 @@ def optional_positive_float(config: dict[str, Any], key: str, *, label: str) -> 
         except ValueError as error:
             raise ValueError(f"{label} must be a positive number") from error
     else:
-        raise ValueError(f"{label} must be a positive number")
+        raise TypeError(f"{label} must be a positive number")
 
-    if number <= 0:
+    if not isfinite(number) or number <= 0:
         raise ValueError(f"{label} must be greater than 0")
 
     return number

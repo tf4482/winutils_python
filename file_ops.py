@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from winutils_python import config as config_utils
 from winutils_python import visual
 
 Operation = dict[str, Any]
@@ -315,7 +316,12 @@ def run_operation(
 
     source = str(operation["source"])
     target = str(operation["target"])
-    overwrite = bool(operation.get("overwrite", default_overwrite))
+    overwrite = config_utils.optional_bool(
+        operation,
+        "overwrite",
+        label=f"{op_type}.overwrite",
+        default=default_overwrite,
+    )
 
     if op_type == "mirror":
         return_code = mirror(source, target, overwrite=overwrite, options=options)
@@ -401,7 +407,12 @@ def operation_group_overwrite(operation_group: Any) -> bool:
     """Return the default overwrite setting for an operation group."""
 
     if isinstance(operation_group, dict):
-        return bool(operation_group.get("overwrite", True))
+        return config_utils.optional_bool(
+            operation_group,
+            "overwrite",
+            label="operation group overwrite",
+            default=True,
+        )
 
     return True
 

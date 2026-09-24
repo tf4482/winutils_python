@@ -1,7 +1,7 @@
 """Terminal output helpers for colored status messages and emojis."""
 
 import sys
-
+from typing import TextIO
 
 RESET = "\033[0m"
 BOLD = "\033[1m"
@@ -35,10 +35,18 @@ COLORS = {
 }
 
 
-def is_terminal() -> bool:
-    """Return whether stdout is an interactive terminal."""
+def is_terminal(stream: TextIO | None = None) -> bool:
+    """Return whether an output stream is an interactive terminal."""
 
-    return bool(sys.stdout and sys.stdout.isatty())
+    output = sys.stdout if stream is None else stream
+    return bool(output and output.isatty())
+
+
+def stream_safe_text(message: str, stream: TextIO) -> str:
+    """Return text representable by the output stream encoding."""
+
+    encoding = stream.encoding or "utf-8"
+    return message.encode(encoding, errors="replace").decode(encoding)
 
 
 def emoji_for(name: str) -> str:
@@ -65,20 +73,28 @@ def colorize(message: str, color: str = "", *, enabled: bool | None = None) -> s
     return f"{color}{message}{RESET}"
 
 
-def print_status(message: str, color: str = "") -> None:
-    """Print a raw colored status message in interactive terminals."""
+def print_status(message: str, color: str = "", *, stream: TextIO | None = None) -> None:
+    """Print a raw status message with terminal-aware color."""
 
-    if not is_terminal():
+    output = sys.stdout if stream is None else stream
+    if output is None:
         return
 
-    print(colorize(message, color, enabled=True), flush=True)
+    text = colorize(message, color, enabled=is_terminal(output))
+    print(stream_safe_text(text, output), file=output, flush=True)
 
 
-def visual_message(message: str, *, emoji: str = "", color: str = "") -> str:
+def visual_message(
+    message: str,
+    *,
+    emoji: str = "",
+    color: str = "",
+    color_enabled: bool = True,
+) -> str:
     """Build a colorized message with an optional emoji prefix."""
 
     text = prefix_emoji(message, emoji)
-    return colorize(text, color_for(color), enabled=True)
+    return colorize(text, color_for(color), enabled=color_enabled)
 
 
 def prefix_emoji(message: str, emoji: str = "") -> str:
@@ -92,19 +108,27 @@ def prefix_emoji(message: str, emoji: str = "") -> str:
     return f"{icon} {message}"
 
 
-def print_visual(message: str, *, emoji: str = "", color: str = "") -> None:
-    """Print a visual status message in interactive terminals."""
+def print_visual(
+    message: str,
+    *,
+    emoji: str = "",
+    color: str = "",
+    stream: TextIO | None = None,
+) -> None:
+    """Print a visual status message with terminal-aware color."""
 
-    if not is_terminal():
+    output = sys.stdout if stream is None else stream
+    if output is None:
         return
 
-    print(visual_message(message, emoji=emoji, color=color), flush=True)
+    text = visual_message(message, emoji=emoji, color=color, color_enabled=is_terminal(output))
+    print(stream_safe_text(text, output), file=output, flush=True)
 
 
 def print_blank() -> None:
-    """Print a blank line in interactive terminals."""
+    """Print a blank line when stdout is available."""
 
-    if not is_terminal():
+    if sys.stdout is None:
         return
 
     print(flush=True)
@@ -143,13 +167,13 @@ def print_success(message: str, *, emoji: str = DEFAULT_SUCCESS_EMOJI) -> None:
 def print_warning(message: str) -> None:
     """Print a warning status message."""
 
-    print_visual(message, emoji="warning", color="warning")
+    print_visual(message, emoji="warning", color="warning", stream=sys.stderr)
 
 
 def print_error(message: str) -> None:
     """Print an error status message."""
 
-    print_visual(message, emoji="error", color="error")
+    print_visual(message, emoji="error", color="error", stream=sys.stderr)
 
 
 def print_done(message: str) -> None:

@@ -1,5 +1,6 @@
 """Terminal selection helpers for choosing named config entries."""
 
+import sys
 from collections.abc import Mapping
 from typing import Any
 
@@ -12,7 +13,7 @@ DEFAULT_PROMPT = "Select set by number or name (or 'exit' to cancel): "
 def normalize_selection_name(selection: str) -> str:
     """Normalize a CLI/menu selection by stripping option prefixes."""
 
-    return selection.lstrip("/-")
+    return selection.strip().lstrip("/-")
 
 
 def is_cancel_choice(choice: str) -> bool:
@@ -34,6 +35,13 @@ def choose_mapping_key_terminal(
         raise SystemExit(empty_message)
 
     names = list(options.keys())
+    if sys.stdin is None or not sys.stdin.isatty():
+        available = ", ".join(names)
+        raise SystemExit(
+            "Non-interactive input requires a set name as the first argument. "
+            f"Available sets: {available}"
+        )
+
     print_options(header, names)
 
     while True:

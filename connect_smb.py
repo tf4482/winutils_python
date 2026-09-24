@@ -24,7 +24,7 @@ SMB_PASSWORD_KEY = "password"
 CONFIG_PATH_KEY = "__config_path__"
 NET_USE_SUCCESS_EXIT_CODE = 0
 NET_USE_ALREADY_ASSIGNED_EXIT_CODE = 2
-NET_USE_SUCCESS_EXIT_CODES = (NET_USE_SUCCESS_EXIT_CODE, NET_USE_ALREADY_ASSIGNED_EXIT_CODE)
+NET_USE_SUCCESS_EXIT_CODES = (NET_USE_SUCCESS_EXIT_CODE,)
 PASSWORD_KEY = (
     b"winutils_python_smb_password_key_v2__"
     b"2f4b64e8f52d49efb9ab6fdb79ce38a6__"
@@ -172,7 +172,7 @@ def store_prompted_password(config: dict, password: str, *, table: str = SMB_CON
     config_path = config.get(CONFIG_PATH_KEY)
 
     if not isinstance(config_path, Path):
-        raise ValueError(f"Loaded configuration is missing internal '{CONFIG_PATH_KEY}'")
+        raise TypeError(f"Loaded configuration is missing internal '{CONFIG_PATH_KEY}'")
 
     replace_or_add_string_value(config_path, table, SMB_ENCRYPTED_PASSWORD_KEY, encrypt_password(password))
     remove_value(config_path, table, SMB_PASSWORD_FILE_KEY)
@@ -225,6 +225,12 @@ def prompt_password_window() -> str:
 def prompt_password() -> str:
     """Prompt for an SMB password in the terminal without echoing input."""
 
+    if sys.stdin is None or not sys.stdin.isatty():
+        raise RuntimeError(
+            "SMB password is unavailable in non-interactive mode. "
+            "Run once interactively to store it before unattended execution."
+        )
+
     return getpass.getpass("SMB password: ")
 
 
@@ -240,6 +246,20 @@ def test_password(password: str, smb_config: dict) -> bool:
     return False
 
 
+def resolve_password_from_config(smb_config: dict) -> tuple[str, bool]:
+    """Return an SMB password and whether it was prompted interactively."""
+
+    encrypted_password = smb_config.get(SMB_ENCRYPTED_PASSWORD_KEY)
+
+    if isinstance(encrypted_password, str):
+        try:
+            return decrypt_password(encrypted_password), False
+        except (ValueError, UnicodeError) as error:
+            visual.print_warning(f"Stored SMB password could not be used: {error}")
+
+    return prompt_password(), True
+
+
 def get_password_from_config(
     smb_config: dict,
     *,
@@ -247,16 +267,8 @@ def get_password_from_config(
 ) -> str:
     """Return the configured SMB password, prompting when none can be used."""
 
-    encrypted_password = smb_config.get(SMB_ENCRYPTED_PASSWORD_KEY)
-
-    if isinstance(encrypted_password, str):
-        try:
-            return decrypt_password(encrypted_password)
-        except Exception as error:
-            visual.print_warning(f"Stored SMB password could not be used: {error}")
-
-    password = prompt_password()
-    if on_password_prompted is not None:
+    password, prompted = resolve_password_from_config(smb_config)
+    if prompted and on_password_prompted is not None:
         on_password_prompted(password)
     return password
 
@@ -267,15 +279,27 @@ def mappings_from_config(smb_config: dict) -> tuple[tuple[str, str], ...]:
     mappings = smb_config.get(SMB_MAPPINGS_KEY)
 
     if not isinstance(mappings, list):
-        raise ValueError(f"SMB configuration must define a '{SMB_MAPPINGS_KEY}' list")
+        raise TypeError(f"SMB configuration must define a '{SMB_MAPPINGS_KEY}' list")
 
-    return tuple((str(mapping["drive"]), str(mapping["share"])) for mapping in mappings)
+    normalized_mappings: list[tuple[str, str]] = []
+    for index, mapping in enumerate(mappings, start=1):
+        if not isinstance(mapping, dict):
+            raise TypeError(f"SMB mapping {index} must be a table")
+
+        drive = str(mapping.get("drive", "")).strip()
+        share = str(mapping.get("share", "")).strip()
+        if not drive or not share:
+            raise ValueError(f"SMB mapping {index} must define non-empty 'drive' and 'share' values")
+
+        normalized_mappings.append((drive, share))
+
+    return tuple(normalized_mappings)
 
 
 def user_from_config(smb_config: dict) -> str:
     """Return the configured SMB user or raise when it is missing."""
 
-    user = str(smb_config.get(SMB_USER_KEY, DEFAULT_USER))
+    user = str(smb_config.get(SMB_USER_KEY, DEFAULT_USER)).strip()
 
     if not user:
         raise ValueError(
@@ -298,7 +322,13 @@ def has_smb_config(config: dict) -> bool:
     if not isinstance(smb_config, dict):
         raise TypeError(f"Configuration value '{SMB_CONFIG_SECTION}' must be a table")
 
-    return bool(smb_config.get(SMB_MAPPINGS_KEY))
+    mappings = smb_config.get(SMB_MAPPINGS_KEY)
+    if mappings is None:
+        return False
+    if not isinstance(mappings, list):
+        raise TypeError(f"SMB configuration value '{SMB_MAPPINGS_KEY}' must be a list")
+
+    return bool(mappings)
 
 
 def normalize_unc_path(path: str) -> str:
@@ -455,10 +485,15 @@ def connect_from_config(
         return []
 
     smb_config = get_table(config, SMB_CONFIG_SECTION)
-    password = get_password_from_config(smb_config, on_password_prompted=on_password_prompted)
+    password, prompted = resolve_password_from_config(smb_config)
     mappings = mappings_from_config(smb_config)
     user = user_from_config(smb_config)
-    return connect_smb_shares(password, mappings, user=user, quiet=True)
+    results = connect_smb_shares(password, mappings, user=user, quiet=True)
+
+    if prompted and on_password_prompted is not None:
+        on_password_prompted(password)
+
+    return results
 
 
 def main() -> None:

@@ -5,9 +5,9 @@ import getpass
 import hashlib
 import subprocess
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 
 import yaml
 
@@ -315,6 +315,8 @@ def existing_drive_mapping(drive: str) -> str | None:
         check=False,
         capture_output=True,
         text=True,
+        encoding="oem",
+        errors="replace",
         creationflags=subprocess_creationflags(),
     )
 

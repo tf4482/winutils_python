@@ -2,13 +2,14 @@
 
 import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from winutils_python import visual
 
 Operation = dict[str, Any]
 FILE_OPERATIONS_SECTION = "file_operations"
-OPERATION_TYPES = ("mirror", "copy", "move")
+OPERATION_TYPES = ("mirror", "copy", "move", "sync")
 ROBOCOPY_FAILURE_EXIT_CODE = 8
 
 
@@ -62,12 +63,13 @@ COMMON_OPTIONS = (
     "/MT:32",
     "/W:2",
     "/R:10",
-    "/XJD",
-    "/XJF",
     "/XJ",
     "/XC",
     "/NFL",
-    "/NJH",
+    "/NDL",
+    "/NC",
+    "/NS",
+    "/NP",
 )
 
 MIRROR_OPTIONS = (
@@ -86,10 +88,19 @@ COPY_OPTIONS = (
     *COMMON_OPTIONS,
 )
 
+SYNC_OPTIONS = (
+    "/E",
+    "/XO",
+    *(option for option in COMMON_OPTIONS if option.upper() != "/XC"),
+)
+
+SYNC_INCOMPATIBLE_OPTIONS = {"/MIR", "/PURGE", "/MOV", "/MOVE", "/XC", "/XN", "/XL"}
+
 OPERATION_OPTIONS = {
     "mirror": MIRROR_OPTIONS,
     "move": MOVE_OPTIONS,
     "copy": COPY_OPTIONS,
+    "sync": SYNC_OPTIONS,
 }
 
 
@@ -240,6 +251,59 @@ def copy(source: str, target: str, *, overwrite: bool = True, options: tuple[str
     return invoke_robocopy(source, target, options, overwrite=overwrite)
 
 
+def validate_sync_paths(source: str, target: str) -> None:
+    """Reject sync folder pairs that could recursively copy into themselves."""
+
+    source_path = Path(source).resolve(strict=False)
+    target_path = Path(target).resolve(strict=False)
+
+    for label, path in (("source", source_path), ("target", target_path)):
+        if not path.exists():
+            raise FileNotFoundError(f"Sync {label} folder does not exist: {path}")
+        if not path.is_dir():
+            raise NotADirectoryError(f"Sync {label} is not a folder: {path}")
+
+    if source_path == target_path:
+        raise ValueError(f"Sync source and target must be different folders: {source}")
+
+    if source_path in target_path.parents or target_path in source_path.parents:
+        raise ValueError(f"Sync folders must not contain one another: {source} ↔ {target}")
+
+
+def combined_sync_return_code(forward_code: int, reverse_code: int) -> int:
+    """Return a representative code for two Robocopy sync passes."""
+
+    if forward_code >= ROBOCOPY_FAILURE_EXIT_CODE:
+        return forward_code
+
+    if reverse_code >= ROBOCOPY_FAILURE_EXIT_CODE:
+        return reverse_code
+
+    return forward_code | reverse_code
+
+
+def effective_sync_options(options: tuple[str, ...]) -> tuple[str, ...]:
+    """Enforce non-destructive, newer-file-wins options for both sync passes."""
+
+    filtered_options = tuple(option for option in options if option.upper() not in SYNC_INCOMPATIBLE_OPTIONS)
+    normalized_options = {option.upper() for option in filtered_options}
+    required_options = tuple(option for option in ("/E", "/XO") if option not in normalized_options)
+    return (*required_options, *filtered_options)
+
+
+def sync(source: str, target: str, *, options: tuple[str, ...] = SYNC_OPTIONS) -> int:
+    """Synchronize two folders bidirectionally, keeping the newer file version."""
+
+    validate_sync_paths(source, target)
+    safe_options = effective_sync_options(options)
+    forward_code = invoke_robocopy(source, target, safe_options)
+    if forward_code >= ROBOCOPY_FAILURE_EXIT_CODE:
+        return forward_code
+
+    reverse_code = invoke_robocopy(target, source, safe_options)
+    return combined_sync_return_code(forward_code, reverse_code)
+
+
 def run_operation(
     op_type: str,
     operation: Operation,
@@ -263,6 +327,10 @@ def run_operation(
 
     if op_type == "copy":
         return_code = copy(source, target, overwrite=overwrite, options=options)
+        return OperationResult(op_type, source, target, return_code)
+
+    if op_type == "sync":
+        return_code = sync(source, target, options=options)
         return OperationResult(op_type, source, target, return_code)
 
     raise ValueError(f"Unsupported file operation type: {op_type}")
@@ -355,7 +423,7 @@ def get_operation_set(config: dict[str, Any], set_name: str) -> dict[str, Any]:
 
 
 def run_operation_set(config: dict[str, Any], set_name: str) -> None:
-    """Run all configured mirror, copy, and move operations in a set."""
+    """Run all configured mirror, copy, move, and sync operations in a set."""
 
     operation_set = get_operation_set(config, set_name)
 
